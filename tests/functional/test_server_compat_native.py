@@ -12,6 +12,7 @@ register. On a platform that has one but hasn't set it up, these skip off
 CI and fail on it -- see utils.absent_server_skips().
 """
 
+from .test_awc_remote_native import TestNativeServer  # noqa: F401 -- discovered from here
 from .utils import os_servers, register_server_tests
 
 # Every scenario shells out to the vncdo CLI (see utils.run_vncdo), so
