@@ -69,6 +69,17 @@ A stage that times out closes the connection and exits 40. Nothing is
 retried: whatever was in flight when the bound passed is reported as it
 stood, and the decision to try again is the caller's.
 
+Two things seen against macOS Screen Sharing are worth knowing. A wrong
+password does not come back as an authentication failure: the server
+drops the connection, so the `authenticate` stage ends `disconnected`
+(exit 11) rather than `failed` (exit 3), and a few wrong attempts lock
+the server for a while so that even the right password disconnects. And
+on a macOS host, a Python interpreter that the system has not granted
+Local Network access -- a `uv`-managed one, for instance -- fails the
+`connect` stage against a LAN or VM address with `No route to host`,
+while the same command from a signed interpreter connects; that is the
+host's privacy setting, not the target.
+
 The password never appears on the command line. It is read from
 `$VNC_PASSWORD` (or the variable named by `--password-env`) or from
 `--password-file`. Output and logs carry only whether one was set.
