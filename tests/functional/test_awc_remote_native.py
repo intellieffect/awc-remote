@@ -13,13 +13,11 @@ Hosted runners only: a developer's macOS may well have Screen Sharing on
 from __future__ import annotations
 
 import json
-import os
 from unittest import TestCase, skipUnless
 
 from .test_awc_remote import address, run_awc
 from .utils import (
     HOST,
-    OS_SERVER_PASSWORD,
     OS_SERVER_TIMEOUT,
     os_servers,
     port_open,
@@ -30,8 +28,8 @@ from .utils import (
 STAGE_TIMEOUT = str(OS_SERVER_TIMEOUT)
 
 
-def _env() -> dict[str, str]:
-    return {"VNC_PASSWORD": OS_SERVER_PASSWORD}
+def _env(server) -> dict[str, str]:
+    return {"VNC_PASSWORD": server.password} if server.password else {}
 
 
 @skipUnless(running_in_ci(), "hosted CI runner only")
@@ -53,7 +51,7 @@ class TestNativeServer(TestCase):
 
     def test_probe_reaches_a_first_frame(self) -> None:
         code, payload, stderr = run_awc(
-            "probe", address(self.server), *self.options(), env=_env(), timeout=OS_SERVER_TIMEOUT * 3,
+            "probe", address(self.server), *self.options(), env=_env(self.server), timeout=OS_SERVER_TIMEOUT * 3,
         )
 
         self.assertEqual(code, 0, f"{stderr}\n{json.dumps(payload, indent=2)}")
@@ -70,7 +68,7 @@ class TestNativeServer(TestCase):
     def test_a_key_is_sent_and_the_receipt_is_honest(self) -> None:
         code, payload, stderr = run_awc(
             "act", address(self.server), *self.options(), "--verify", "not-black",
-            "--verify-timeout", STAGE_TIMEOUT, "key", "shift", env=_env(), timeout=OS_SERVER_TIMEOUT * 4,
+            "--verify-timeout", STAGE_TIMEOUT, "key", "shift", env=_env(self.server), timeout=OS_SERVER_TIMEOUT * 4,
         )
 
         self.assertIn(code, (0, 60), f"{stderr}\n{json.dumps(payload, indent=2)}")
@@ -81,6 +79,8 @@ class TestNativeServer(TestCase):
               f"frames_seen={receipt['frames_seen']}")
 
     def test_the_wrong_password_fails_authenticate_without_a_leak(self) -> None:
+        if not self.server.password:
+            self.skipTest(f"{self.server.name} takes no password")
         code, payload, _ = run_awc(
             "probe", address(self.server), *self.options(), env={"VNC_PASSWORD": "not-the-password"},
             timeout=OS_SERVER_TIMEOUT * 3,
@@ -89,5 +89,4 @@ class TestNativeServer(TestCase):
         self.assertEqual(code, 3, payload)
         self.assertEqual(payload["session"]["failed_stage"], "authenticate")
         self.assertNotIn("not-the-password", json.dumps(payload))
-        self.assertNotIn(OS_SERVER_PASSWORD, json.dumps(payload))
-        self.assertIsNotNone(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
+        self.assertNotIn(self.server.password, json.dumps(payload))

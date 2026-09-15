@@ -11,7 +11,6 @@ so a network filesystem that does not honour it voids the guarantee.
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import math
@@ -24,6 +23,11 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator
+
+try:
+    import fcntl
+except ImportError:  # Windows: no flock, so no leases -- the rest of the CLI still runs
+    fcntl = None  # type: ignore[assignment]
 
 DEFAULT_TTL = 300.0
 _SLUG = re.compile(r"[^A-Za-z0-9._-]+")
@@ -42,6 +46,10 @@ def check_seconds(value: float | str, what: str) -> float:
 
 class LeaseError(Exception):
     pass
+
+
+class LeasesUnavailable(LeaseError):
+    """This platform has no ``fcntl``, so no lease can be taken or checked."""
 
 
 class LeaseHeld(LeaseError):
@@ -109,6 +117,8 @@ class LeaseStore:
 
     @contextmanager
     def _locked(self, target: str) -> Iterator[Path]:
+        if fcntl is None:
+            raise LeasesUnavailable("leases need fcntl.flock, which this platform does not provide")
         self.directory.mkdir(parents=True, exist_ok=True)
         lock_path, record_path = self._paths(target)
         fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)

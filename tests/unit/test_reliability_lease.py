@@ -130,6 +130,17 @@ class TestLeaseStore(unittest.TestCase):
         self.assertIsNone(self.store.status(TARGET))
         self.assertEqual(self.store.acquire(TARGET, "worker-b", ttl=60).owner, "worker-b")
 
+    def test_without_fcntl_every_operation_says_so(self) -> None:
+        from unittest import mock
+
+        from vncdotool.reliability import lease as lease_module
+
+        with mock.patch.object(lease_module, "fcntl", None):
+            with self.assertRaises(lease_module.LeasesUnavailable):
+                self.store.acquire(TARGET, "worker-a", ttl=60)
+            with self.assertRaises(lease_module.LeasesUnavailable):
+                self.store.status(TARGET)
+
     def test_slug_is_stable_and_distinct(self) -> None:
         self.assertEqual(slug(TARGET), slug(TARGET))
         self.assertNotEqual(slug(TARGET), slug("studio.example:5901"))

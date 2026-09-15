@@ -449,3 +449,20 @@ class TestUsageErrorsAreJSON(unittest.TestCase):
     def test_bad_expect_size(self) -> None:
         payload = self.usage("act", "host", "--expect-size", "garbage", "key", "a")
         self.assertIn("WIDTHxHEIGHT", payload["error"])
+
+
+class TestWithoutFcntl(CLIHarness):
+    """Windows has no flock: probe and act still run, and lease commands say why they cannot."""
+
+    def test_probe_runs_and_lease_reports_unavailable(self) -> None:
+        from vncdotool.reliability import lease as lease_module
+
+        with mock.patch.object(lease_module, "fcntl", None):
+            self.server = FakeServer(frames=[GREY])
+            code, payload = self.run_cli("probe", "host")
+            self.assertEqual(code, 0)
+
+            out = io.StringIO()
+            code = cli.main(["lease", "--lease-dir", tempfile.gettempdir(), "status", "--target", "t"], stdout=out)
+            self.assertEqual(code, 1)
+            self.assertIn("fcntl", json.loads(out.getvalue())["error"])
