@@ -7,13 +7,26 @@ import unittest
 from typing import Dict, List, Mapping, Tuple
 
 from tests.functional.utils import (
+    OS_SERVERS_BY_PLATFORM,
     TCP_SERVERS,
     VNCEV,
     VNCServer,
     absent_server_skips,
+    hosted_isolated_ci,
     os_servers,
     running_in_ci,
 )
+
+HOSTED = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}
+
+# CI-looking environments that are still not a throwaway hosted runner.
+NOT_HOSTED: Dict[str, Mapping[str, str]] = {
+    "unset": {},
+    "CI_true_alone": {"CI": "true"},
+    "GITHUB_ACTIONS_alone": {"GITHUB_ACTIONS": "true"},
+    "self_hosted": {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "self-hosted"},
+    "hosted_but_not_ci": {"RUNNER_ENVIRONMENT": "github-hosted"},
+}
 
 ENV_SAMPLES: Dict[str, Tuple[Mapping[str, str], bool]] = {
     "unset": ({}, False),
@@ -36,7 +49,7 @@ NEVER_SKIPPING = TCP_SERVERS + [VNCEV]
 
 
 def native_servers() -> List[Tuple[str, VNCServer]]:
-    return [(platform, server) for platform in NATIVE_PLATFORMS for server in os_servers(platform)]
+    return [(platform, server) for platform in NATIVE_PLATFORMS for server in os_servers(platform, HOSTED)]
 
 
 class CIDetection:
@@ -74,13 +87,37 @@ class ContainerServerVerdict:
 
 
 class TestNativeServersAreRegistered(unittest.TestCase):
-    def test_every_supported_platform_has_one(self) -> None:
+    def test_every_supported_platform_has_one_on_a_hosted_runner(self) -> None:
         for platform in NATIVE_PLATFORMS:
             self.assertTrue(
-                os_servers(platform),
+                os_servers(platform, HOSTED),
                 f"no OS-hosted server registered for {platform}, so the cases "
                 "generated below assert nothing",
             )
+            self.assertEqual(os_servers(platform, HOSTED), OS_SERVERS_BY_PLATFORM[platform])
+
+
+class TestNativeServersAreNotRegisteredElsewhere(unittest.TestCase):
+    """Fail closed: off a hosted runner nothing native registers, whatever 5900 answers."""
+
+    def test_hosted_gate(self) -> None:
+        self.assertTrue(hosted_isolated_ci(HOSTED))
+        for name, env in NOT_HOSTED.items():
+            with self.subTest(env=name):
+                self.assertFalse(hosted_isolated_ci(env))
+
+    def test_nothing_registers_off_a_hosted_runner(self) -> None:
+        for platform in NATIVE_PLATFORMS:
+            for name, env in NOT_HOSTED.items():
+                with self.subTest(platform=platform, env=name):
+                    self.assertEqual(os_servers(platform, env), [])
+
+    def test_this_very_process_registers_nothing_unless_hosted(self) -> None:
+        import os
+
+        if hosted_isolated_ci(os.environ):
+            self.skipTest("on a hosted runner, where registration is the point")
+        self.assertEqual(os_servers(), [])
 
 
 def _case(name: str, body: type, attrs: Dict[str, object], method: str) -> unittest.TestCase:
@@ -90,6 +127,7 @@ def _case(name: str, body: type, attrs: Dict[str, object], method: str) -> unitt
 def load_tests(loader: unittest.TestLoader, tests: unittest.TestSuite, pattern: object) -> unittest.TestSuite:
     suite = unittest.TestSuite()
     suite.addTests(loader.loadTestsFromTestCase(TestNativeServersAreRegistered))
+    suite.addTests(loader.loadTestsFromTestCase(TestNativeServersAreNotRegisteredElsewhere))
     for env_name, (env, is_ci) in ENV_SAMPLES.items():
         suite.addTest(
             _case(

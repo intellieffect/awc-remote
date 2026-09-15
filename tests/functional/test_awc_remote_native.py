@@ -8,7 +8,8 @@ a blank hosted screen; it says nothing about an interactive user desktop,
 whose frames, timing and focus rules are a separate measurement.
 
 Hosted runners only: a developer's macOS may well have Screen Sharing on
-5900, and it is theirs, so off CI every case skips rather than dialling it.
+5900, and it is theirs, so off a hosted runner every case skips rather than
+dialling it -- `utils.os_servers` registers nothing there either.
 """
 from __future__ import annotations
 
@@ -19,9 +20,9 @@ from .test_awc_remote import address, run_awc
 from .utils import (
     HOST,
     OS_SERVER_TIMEOUT,
+    hosted_isolated_ci,
     os_servers,
     port_open,
-    running_in_ci,
 )
 
 # Generous: a hosted Screen Sharing answered a key event in over five seconds.
@@ -32,7 +33,7 @@ def _env(server) -> dict[str, str]:
     return {"VNC_PASSWORD": server.password} if server.password else {}
 
 
-@skipUnless(running_in_ci(), "hosted CI runner only")
+@skipUnless(hosted_isolated_ci(), "hosted CI runner only")
 class TestNativeServer(TestCase):
     def setUp(self) -> None:
         servers = os_servers()
