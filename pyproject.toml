@@ -54,6 +54,7 @@ vncdo = "vncdotool.command:vncdo"
 vncdotool = "vncdotool.command:vncdo"
 vnclog = "vncdotool.command:vnclog"
 vncdo-replay = "vncdotool.command:vncdo_replay"
+awc-remote = "vncdotool.reliability.cli:entrypoint"
 
 [dependency-groups]
 dev = [

@@ -25,6 +25,7 @@ nav:
   - Embedding in Python Applications: library.md
   - Command Reference: commands.md
   - Capturing a Session: capture.md
+  - Reliable Sessions (awc-remote): reliability.md
   - Release History: history.md
   - Contributing: contributing.md
   - Code Documentation: api.md

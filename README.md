@@ -13,6 +13,13 @@ hardware devices that are otherwise difficult to control.
 
 It's under active development and seems to be working, but please report any problems you have.
 
+## AWC Remote
+
+This fork adds `awc-remote`, a JSON command line for driving a desktop
+headlessly with explicit bounds and outcomes: staged connection timeouts,
+receipts for every input, and cooperative per-target leases. See
+[docs/reliability.md](docs/reliability.md). The `vncdo` client below is unchanged.
+
 ## Quick Start
 
 To use vncdotool you need a VNC server.
