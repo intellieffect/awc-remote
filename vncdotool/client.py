@@ -669,9 +669,14 @@ class VNCDoToolClient(rfb.RFBClient):
     def commitUpdate(self, rectangles: list[tuple[int, int, int, int]] | None = None) -> None:
         if self.deferred:
             if not rectangles or self.screen is None:
-                # No rectangle in this update painted self.screen; wait for
-                # one that does before completing the refresh.
-                self.framebufferUpdateRequest()
+                # No rectangle in this update painted self.screen; ask again
+                # for one that does, keeping the mode of the refresh being
+                # continued. incremental=0 means "I have lost my contents,
+                # resend everything" (RFC 6143 7.5.3), so using it to continue
+                # an incremental wait abandons the wait -- and a polling server
+                # that answers with a bare pseudo-update before the real change
+                # then never resends it, hanging the refresh until its deadline.
+                self.framebufferUpdateRequest(incremental=not self._fullscreen.pending)
                 return
             if not self._fullscreen.complete:
                 if self._fullscreen.retry():
