@@ -474,6 +474,15 @@ class TestVNCDoToolClient(TestCase):
         b"\x00\x00\xff\x00"  # one RGBX pixel
         b"\x80"  # one mask row
     )
+    # The PointerPos pseudo-encoding reports where the server moved the
+    # pointer; it carries no framebuffer pixels, so it is not a screen change.
+    MSG_FBU_POINTER_POS_ONLY = (
+        b"\x00"  # FRAMEBUFFER_UPDATE
+        b"\x00"  # padding
+        b"\x00\x01"  # number-of-rectangles
+        b"\x00\x05\x00\x06\x00\x00\x00\x00"  # pointer at 5,6
+        b"\xff\xff\xff\x18"  # PSEUDO_POINTER_POS (-232)
+    )
     MSG_FBU_ONE_PIXEL = (
         b"\x00"  # FRAMEBUFFER_UPDATE
         b"\x00"  # padding
@@ -508,7 +517,7 @@ class TestVNCDoToolClient(TestCase):
         client.dataReceived(self.MSG_FBU_DESKTOP_SIZE_ONLY)
 
         self.assertEqual(fired, [])
-        client.framebufferUpdateRequest.assert_called_once_with()
+        client.framebufferUpdateRequest.assert_called_once_with(incremental=False)
 
     def test_cursor_only_update_rerequests_instead_of_completing(self) -> None:
         client = self.client
@@ -522,7 +531,25 @@ class TestVNCDoToolClient(TestCase):
         client.dataReceived(self.MSG_FBU_CURSOR_ONLY)
 
         self.assertEqual(fired, [])
-        client.framebufferUpdateRequest.assert_called_once_with()
+        client.framebufferUpdateRequest.assert_called_once_with(incremental=False)
+
+    def test_incremental_wait_rerequests_incrementally_after_a_pseudo_update(self) -> None:
+        # A polling server (x11vnc) answers a client waiting for a scene
+        # change with a pointer-position update before the change lands. The
+        # re-request has to stay incremental: incremental=0 would ask the
+        # server to resend everything and drop the awaited change.
+        client = self.client
+        self._connect()
+        client.screen = Image.new("RGB", (client.width, client.height))
+        d = client.refreshScreen(incremental=True)
+        fired: list = []
+        d.addCallback(fired.append)
+        client.framebufferUpdateRequest.reset_mock()
+
+        client.dataReceived(self.MSG_FBU_POINTER_POS_ONLY)
+
+        self.assertEqual(fired, [])
+        client.framebufferUpdateRequest.assert_called_once_with(incremental=True)
 
     def test_refresh_completes_once_pixel_data_arrives(self) -> None:
         client = self.client
