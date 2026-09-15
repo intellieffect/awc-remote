@@ -10,13 +10,13 @@ from vncdotool.reliability.actions import ReceiptStatus, perform
 from vncdotool.reliability.client import ReliableFactory
 from vncdotool.reliability.session import Session, StageTimeouts
 
-from reliability_fakes import FakeServer, settle
+from tests.unit.reliability_fakes import FakeServer, settle
 
 GREY = (40, 40, 40)
 WHITE = (250, 250, 250)
 
 
-class TestPerform(unittest.TestCase):
+class PerformCase(unittest.TestCase):
     def setUp(self) -> None:
         self.clock = Clock()
         self.server = FakeServer(width=8, height=4, frames=[GREY])
@@ -34,6 +34,9 @@ class TestPerform(unittest.TestCase):
 
     def key_events(self):
         return [key for key, _ in self.transport.keys]
+
+
+class TestPerform(PerformCase):
 
     # -- nothing sent ------------------------------------------------------
 
@@ -186,7 +189,8 @@ class TestPerform(unittest.TestCase):
         receipt = settle(self.perform(actions.key_press("a"), verify=broken))
 
         self.assertIs(receipt.status, ReceiptStatus.UNKNOWN)
-        self.assertIn("boom", receipt.reason)
+        self.assertIn("RuntimeError", receipt.reason)
+        self.assertNotIn("boom", receipt.reason)
 
     def test_no_retry_after_an_unknown_outcome(self) -> None:
         d = self.perform(actions.key_press("a"), verify=actions.pixels_changed)
@@ -213,3 +217,110 @@ class TestPerform(unittest.TestCase):
         self.assertEqual(data["status"], "verified")
         self.assertEqual(data["action"], "key a")
         self.assertEqual(data["frame"]["sequence"], 2)
+
+
+class TestPerformAcrossResize(PerformCase):
+    def test_resize_after_sending_makes_the_outcome_unknown(self) -> None:
+        d = self.perform(actions.key_press("a"), verify=actions.pixels_changed)
+
+        self.server.send_resize(16, 4)
+        self.server.send_frame(WHITE)
+
+        receipt = settle(d)
+        self.assertIs(receipt.status, ReceiptStatus.UNKNOWN)
+        self.assertIn("generation", receipt.reason)
+        self.assertEqual(receipt.frame.generation, 2)
+        self.assertEqual(self.client.events_sent, 2)
+
+
+class TestPartialSend(PerformCase):
+    def test_an_action_that_raises_after_writing_is_unknown_and_not_resent(self) -> None:
+        def half_typed(client):
+            client.keyPress("s")
+            client.keyPress("3")
+            raise RuntimeError("typed s3cret so far")
+        half_typed.__name__ = "type secret"
+
+        receipt = settle(self.perform(half_typed))
+
+        self.assertIs(receipt.status, ReceiptStatus.UNKNOWN)
+        self.assertTrue(receipt.sent)
+        self.assertIn("after 4 event(s)", receipt.reason)
+        self.assertIn("RuntimeError", receipt.reason)
+        self.assertNotIn("s3cret", receipt.reason)
+        self.assertEqual(self.client.events_sent, 4)
+        self.assertEqual(self.clock.getDelayedCalls(), [])
+
+    def test_an_action_that_raises_before_writing_is_failed(self) -> None:
+        def refuses(client):
+            raise RuntimeError("s3cret")
+
+        receipt = settle(self.perform(refuses))
+
+        self.assertIs(receipt.status, ReceiptStatus.FAILED)
+        self.assertNotIn("s3cret", receipt.reason)
+        self.assertEqual(self.client.events_sent, 0)
+
+    def test_own_exceptions_keep_their_message(self) -> None:
+        receipt = settle(self.perform(actions.click(100, 100)))
+
+        self.assertIs(receipt.status, ReceiptStatus.FAILED)
+        self.assertIn("RegionError", receipt.reason)
+        self.assertIn("not inside", receipt.reason)
+
+    def test_timeout_must_be_finite_and_positive(self) -> None:
+        for bad in (0, -1, float("nan"), float("inf")):
+            with self.subTest(timeout=bad), self.assertRaises(ValueError):
+                self.perform(actions.key_press("a"), verify=actions.pixels_changed, timeout=bad)
+        self.assertEqual(self.client.events_sent, 0)
+
+
+class TestPerformWithLease(PerformCase):
+    def setUp(self) -> None:
+        super().setUp()
+        import tempfile
+        from vncdotool.reliability.lease import LeaseStore
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.now = 1000.0
+        self.store = LeaseStore(self.tmp.name, clock=lambda: self.now)
+
+    def test_holder_sends_and_the_lease_outlives_the_verification_bound(self) -> None:
+        from vncdotool.reliability.lease import take
+        held = take(self.store, "t:5900", "me", ttl=1)
+
+        receipt = settle(self.perform(actions.key_press("a"), lease=held, timeout=3.0))
+
+        self.assertIs(receipt.status, ReceiptStatus.SENT)
+        self.assertGreaterEqual(self.store.status("t:5900").expires_at, self.now + 3.0 + actions.LEASE_MARGIN)
+
+    def test_a_longer_remaining_lease_is_not_shortened(self) -> None:
+        from vncdotool.reliability.lease import take
+        held = take(self.store, "t:5900", "me", ttl=600)
+
+        settle(self.perform(actions.key_press("a"), lease=held, timeout=3.0))
+
+        self.assertEqual(self.store.status("t:5900").expires_at, self.now + 600)
+
+    def test_non_owner_is_refused_before_any_input(self) -> None:
+        from vncdotool.reliability.lease import LeaseHold, take
+        self.store.acquire("t:5900", "someone-else", ttl=60)
+        other = take(self.store, "t:5901", "me", ttl=60)
+        stale = LeaseHold(self.store, other.lease._replace(target="t:5900") if hasattr(other.lease, "_replace")
+                          else type(other.lease)(**{**other.lease.__dict__, "target": "t:5900"}))
+
+        receipt = settle(self.perform(actions.key_press("a"), lease=stale))
+
+        self.assertIs(receipt.status, ReceiptStatus.FAILED)
+        self.assertIn("not held", receipt.reason)
+        self.assertEqual(self.client.events_sent, 0)
+
+    def test_an_expired_lease_is_refused_before_any_input(self) -> None:
+        from vncdotool.reliability.lease import take
+        held = take(self.store, "t:5900", "me", ttl=1)
+        self.now += 2
+
+        receipt = settle(self.perform(actions.key_press("a"), lease=held))
+
+        self.assertIs(receipt.status, ReceiptStatus.FAILED)
+        self.assertEqual(self.client.events_sent, 0)

@@ -1,10 +1,13 @@
 # AWC Remote reliability layer — first implementation
 
 Status: built as `vncdotool/reliability/` and the `awc-remote` console
-script; user documentation in `docs/reliability.md`. Live keyboard/mouse
-verification against a real desktop has not been run (no isolated VM was
-available); the unit suite drives every path through a scripted RFB server
-behind a mocked transport.
+script; user documentation in `docs/reliability.md`. The unit suite drives
+every path through a scripted RFB server behind a mocked transport;
+`tests/functional/test_awc_remote.py` drives the real console script
+against the container fleet (TigerVNC with and without a password,
+libvncserver's resizing example, a scripted server that stalls after the
+handshake). Evidence from a macOS Screen Sharing target is recorded
+separately in the PR, not in this suite.
 
 ## Problem
 VNC event delivery does not prove that the screen is ready or the intended operation succeeded. Add a headless orchestration layer while preserving vncdotool's protocol/client API and MIT notices.
@@ -26,7 +29,7 @@ Product GUI, billing, cloud relay, OCR/LLM accuracy claims, unattended password 
 - `session.py`: `Session` with `StageTimeouts`; `connect_endpoint` mirrors `factory_connect` but returns the attempt so a connect timeout can cancel it. A finished session ignores late callbacks and never reconnects.
 - `actions.py`: `perform()` settles an `ActionReceipt`; verification keeps an incremental update request outstanding, as `stable` does, and only frames with a sequence past the one at send time count. Predicates: `pixels_changed` (weak), `not_black`, `matches_image`, `region_changed`.
 - `lease.py`: `LeaseStore` over `fcntl.flock` and a JSON record per target; token-checked renew/release; expired leases are taken over. POSIX only.
-- `cli.py`: `awc-remote probe|act|lease`; `main()` takes the connector, clock and runner so tests run it without the reactor. Exit codes reuse `vncdo`'s where they coincide (3, 10, 11, 40) and add 50/51 for leases and 60/61 for receipts.
+- `cli.py`: `awc-remote probe|act|lease`; `main()` takes the connector, clock and runner so tests run it without the reactor. `--lease-token` gates `probe`/`act` on holding the lease; lease targets and session reports share one canonical spelling (`session.target_name`). Exit codes reuse `vncdo`'s where they coincide (3, 10, 11, 40) and add 50/51 for leases and 60/61 for receipts.
 
 ## Not verified here
 

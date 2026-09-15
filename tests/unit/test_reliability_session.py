@@ -8,7 +8,7 @@ from vncdotool.const import AuthTypes
 from vncdotool.reliability.client import ReliableFactory
 from vncdotool.reliability.session import Outcome, Session, SessionError, Stage, StageTimeout, StageTimeouts
 
-from reliability_fakes import FakeServer, outcome_of, settle
+from tests.unit.reliability_fakes import FakeServer, outcome_of, settle
 
 TIMEOUTS = StageTimeouts(connect=2.0, authenticate=3.0, first_frame=5.0)
 
@@ -210,3 +210,21 @@ class TestSessionStages(unittest.TestCase):
         self.assertNotIn("hunter2", str(report.to_json()))
         self.assertEqual(session.factory.describe()["password_set"], True)
         self.assertNotIn("hunter2", str(session.factory.describe()))
+
+
+class TestTargetName(unittest.TestCase):
+    def test_display_and_port_spellings_name_one_target(self) -> None:
+        from vncdotool.command import parse_server
+        from vncdotool.reliability.session import target_name
+
+        self.assertEqual(target_name(*parse_server("host:1")), target_name(*parse_server("host::5901")))
+        self.assertEqual(target_name(*parse_server("ws://h/x?y=1")), parse_server("ws://h/x?y=1")[1])
+        self.assertEqual(target_name(socket.AF_UNIX, "/tmp/s", 0), "unix:/tmp/s")
+
+
+class TestStageTimeoutsValidation(unittest.TestCase):
+    def test_every_bound_must_be_finite_and_positive(self) -> None:
+        for bad in (0, -1, float("nan"), float("inf")):
+            with self.subTest(value=bad), self.assertRaises(ValueError):
+                StageTimeouts(first_frame=bad)
+        self.assertEqual(StageTimeouts(1, 2, 3).total, 6)

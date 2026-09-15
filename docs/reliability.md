@@ -73,7 +73,9 @@ The password never appears on the command line. It is read from
 `$VNC_PASSWORD` (or the variable named by `--password-env`) or from
 `--password-file`. Output and logs carry only whether one was set.
 `--screenshot FILE` saves the last frame, and is opt-in because a frame of
-someone's desktop is theirs to protect.
+someone's desktop is theirs to protect: the file is created new with mode
+0600, and an existing path or a symlink is refused rather than overwritten
+or written through.
 
 ## Actions and receipts
 
@@ -97,7 +99,10 @@ other size fails the action without sending it.
 
 `unknown` is the honest answer and stays unknown. A second key press after
 an unconfirmed first one is two key presses, so `awc-remote` never resends;
-inspect the frame in the receipt and decide.
+inspect the frame in the receipt and decide. A desktop resize that lands
+after the input was sent also settles as `unknown`: the frame that arrived
+belongs to a new generation and is not comparable to the one the action
+was planned on.
 
 ## Cooperative leases
 
@@ -114,12 +119,32 @@ released or renewed only with the token that `acquire` printed. A second
 wrong token exits 51. Leases live under `$AWC_REMOTE_LEASE_DIR`, or
 `~/.local/state/awc-remote/leases`.
 
+`probe` and `act` take the lease into the run in one of two ways.
+`--lease-owner NAME` takes the lease as NAME for exactly this invocation,
+sized to its own bounds (every stage timeout plus the verify timeout), and
+releases it when the run ends; a target someone else holds exits 50 before
+anything is dialled. `--lease-token TOKEN` runs under a lease acquired
+earlier, renews it to cover the run, and leaves it held afterwards; a token
+that does not hold the target exits 51. In both forms the lease is checked
+and renewed again right before the input is written, so it cannot lapse
+between the check and the last frame of verification. Without either
+option, leases are not consulted at all.
+
+A target is spelled as the server is spelled for `probe` and `act`:
+`host:1` and `host::5901` name one lease, recorded as `host:5901`, the
+same string a session report carries as `target`. Nothing resolves names:
+`localhost`, `127.0.0.1` and the machine's hostname are three targets, and
+a server reachable by two addresses can be leased twice. Pick one
+spelling per target and use it everywhere.
+
 The guarantee is exactly this: **two processes that go through the same
 lease directory will not both believe they hold one target at one time.**
 Nothing reaches the VNC server. A person at the console, a Screen Sharing
 session, or a VNC client that does not consult the directory is neither
 blocked nor noticed. Processes on different machines coordinate only if
 the directory is on a filesystem they share and that honours `flock`.
+Leases use `fcntl`, which exists on macOS and Linux; on Windows the
+`lease` command and the `--lease-*` options are not available.
 
 ## From Python
 

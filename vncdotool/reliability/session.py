@@ -49,6 +49,16 @@ class StageTimeouts:
     authenticate: float = 15.0
     first_frame: float = 30.0
 
+    def __post_init__(self) -> None:
+        from .lease import check_seconds
+
+        for stage in Stage:
+            check_seconds(self.for_stage(stage), f"{stage.value} timeout")
+
+    @property
+    def total(self) -> float:
+        return self.connect + self.authenticate + self.first_frame
+
     def for_stage(self, stage: Stage) -> float:
         return {
             Stage.CONNECT: self.connect,
@@ -140,6 +150,19 @@ def connect_endpoint(
     raise ValueError(family)
 
 
+def target_name(family: websocket.AddressFamily, host: str, port: int) -> str:
+    """One spelling of a target, shared by session reports and leases.
+
+    ``vncdo``'s ``host:1`` and ``host::5901`` name the same server; a lease
+    keyed on the spelling would let two callers hold "the same" target.
+    """
+    if family is websocket.WEBSOCKET:
+        return host
+    if hasattr(socket, "AF_UNIX") and family == socket.AF_UNIX:
+        return f"unix:{host}"
+    return f"{host}:{port}"
+
+
 class Session:
     """Drive one connection through its stages within the given bounds.
 
@@ -164,7 +187,7 @@ class Session:
         self.timeouts = timeouts or StageTimeouts()
         self.clock = clock
         self.connect = connect
-        self.report = SessionReport(target=f"{host}:{port}")
+        self.report = SessionReport(target=target_name(family, host, port))
         self.protocol: ReliableClient | None = None
         self.result: Deferred = Deferred()
         self._attempt: Deferred | None = None

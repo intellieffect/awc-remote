@@ -12,7 +12,7 @@ from twisted.internet.task import Clock
 from vncdotool.const import AuthTypes
 from vncdotool.reliability import cli
 
-from reliability_fakes import FakeServer
+from tests.unit.reliability_fakes import FakeServer
 
 GREY = (40, 40, 40)
 WHITE = (250, 250, 250)
@@ -266,3 +266,186 @@ class TestParser(unittest.TestCase):
         self.assertEqual(cli.parse_server("host:1")[1:], ("host", 5901))
         self.assertEqual(cli.parse_server("host::5999")[2], 5999)
         self.assertEqual(cli.parse_server("host")[0], socket.AF_UNSPEC)
+
+
+class TestLeaseGate(CLIHarness):
+    def setUp(self) -> None:
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        from vncdotool.reliability.lease import LeaseStore
+        self.store = LeaseStore(self.tmp.name)
+
+    def test_holder_may_act(self) -> None:
+        lease = self.store.acquire("host:5901", "me", ttl=60)
+        self.server = FakeServer(frames=[GREY])
+
+        code, payload = self.run_cli(
+            "act", "host:1", "--lease-dir", self.tmp.name, "--lease-token", lease.token, "key", "a",
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["receipt"]["status"], "sent")
+
+    def test_wrong_token_is_refused_before_connecting(self) -> None:
+        self.store.acquire("host:5901", "someone-else", ttl=60)
+        self.server = FakeServer(frames=[GREY])
+
+        code, payload = self.run_cli(
+            "probe", "host::5901", "--lease-dir", self.tmp.name, "--lease-token", "nope",
+        )
+
+        self.assertEqual(code, 51)
+        self.assertEqual(payload["target"], "host:5901")
+        self.assertIsNone(self.server.protocol)
+
+    def test_no_lease_at_all_is_refused_when_a_token_is_offered(self) -> None:
+        self.server = FakeServer(frames=[GREY])
+
+        code, _ = self.run_cli("probe", "host", "--lease-dir", self.tmp.name, "--lease-token", "x")
+
+        self.assertEqual(code, 51)
+
+    def test_lease_target_spellings_are_normalised(self) -> None:
+        out = io.StringIO()
+        cli.main(["lease", "--lease-dir", self.tmp.name, "acquire", "--target", "host:1", "--owner", "me"], stdout=out)
+        token = json.loads(out.getvalue())["lease"]["token"]
+
+        lease = ["lease", "--lease-dir", self.tmp.name]
+        out = io.StringIO()
+        code = cli.main([*lease, "acquire", "--target", "host::5901", "--owner", "you"], stdout=out)
+        self.assertEqual(code, 50)
+
+        out = io.StringIO()
+        code = cli.main([*lease, "release", "--target", "host::5901", "--token", token], stdout=out)
+        self.assertEqual(code, 0)
+
+
+class TestLeaseOwnerForTheRun(CLIHarness):
+    def setUp(self) -> None:
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        from vncdotool.reliability.lease import LeaseStore
+        self.store = LeaseStore(self.tmp.name)
+
+    def test_takes_the_lease_for_the_run_and_releases_it(self) -> None:
+        self.server = FakeServer(frames=[GREY, WHITE])
+
+        code, payload = self.run_cli(
+            "act", "host::5901", "--lease-dir", self.tmp.name, "--lease-owner", "me", "--verify", "changed", "key", "a",
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["receipt"]["status"], "verified")
+        self.assertIsNone(self.store.status("host:5901"))
+
+    def test_refused_while_another_owner_holds_and_nothing_is_dialled(self) -> None:
+        self.store.acquire("host:5901", "other", ttl=60)
+        self.server = FakeServer(frames=[GREY])
+
+        code, payload = self.run_cli("act", "host:1", "--lease-dir", self.tmp.name, "--lease-owner", "me", "key", "a")
+
+        self.assertEqual(code, 50)
+        self.assertEqual(payload["lease"]["owner"], "other")
+        self.assertIsNone(self.server.protocol)
+
+    def test_token_holder_keeps_the_lease_after_the_run(self) -> None:
+        lease = self.store.acquire("host:5901", "me", ttl=60)
+        self.server = FakeServer(frames=[GREY])
+
+        code, _ = self.run_cli("probe", "host:1", "--lease-dir", self.tmp.name, "--lease-token", lease.token)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self.store.status("host:5901").token, lease.token)
+
+    def test_token_and_owner_are_exclusive(self) -> None:
+        self.server = FakeServer(frames=[GREY])
+        with mock.patch("sys.stdout", io.StringIO()) as out, self.assertRaises(SystemExit) as caught:
+            self.run_cli("probe", "host", "--lease-token", "t", "--lease-owner", "me")
+        self.assertEqual(caught.exception.code, 2)
+        self.assertFalse(json.loads(out.getvalue())["ok"])
+
+
+class TestScreenshotSafety(CLIHarness):
+    def test_existing_path_is_refused_and_the_session_still_closes(self) -> None:
+        self.server = FakeServer(frames=[GREY])
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fp:
+            fp.write(b"keep me")
+        self.addCleanup(os.unlink, fp.name)
+
+        code, payload = self.run_cli("probe", "host", "--screenshot", fp.name)
+
+        self.assertEqual(code, 1)
+        self.assertFalse(payload["ok"])
+        self.assertIn("FileExistsError", payload["error"])
+        self.assertTrue(payload["session"]["ready"])
+        self.assertTrue(self.server.dropped)
+        with open(fp.name, "rb") as kept:
+            self.assertEqual(kept.read(), b"keep me")
+
+    def test_symlink_is_not_written_through(self) -> None:
+        self.server = FakeServer(frames=[GREY])
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "target.png")
+            link = os.path.join(tmp, "link.png")
+            os.symlink(target, link)
+
+            code, payload = self.run_cli("probe", "host", "--screenshot", link)
+
+            self.assertEqual(code, 1)
+            self.assertFalse(os.path.exists(target))
+
+    def test_new_file_is_private(self) -> None:
+        self.server = FakeServer(frames=[GREY])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "frame.png")
+            old = os.umask(0)
+            try:
+                code, _ = self.run_cli("probe", "host", "--screenshot", path)
+            finally:
+                os.umask(old)
+            self.assertEqual(code, 0)
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+    def test_unknown_extension_is_an_error_with_json(self) -> None:
+        self.server = FakeServer(frames=[GREY])
+        with tempfile.TemporaryDirectory() as tmp:
+            code, payload = self.run_cli("probe", "host", "--screenshot", os.path.join(tmp, "frame.what"))
+        self.assertEqual(code, 1)
+        self.assertIn("image format", payload["error"])
+
+    def test_screenshot_failure_after_an_action_still_reports_the_receipt(self) -> None:
+        self.server = FakeServer(frames=[GREY])
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fp:
+            pass
+        self.addCleanup(os.unlink, fp.name)
+
+        code, payload = self.run_cli("act", "host", "--screenshot", fp.name, "key", "a")
+
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["receipt"]["status"], "sent")
+
+
+class TestUsageErrorsAreJSON(unittest.TestCase):
+    def usage(self, *argv: str) -> dict:
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out), self.assertRaises(SystemExit) as caught:
+            cli.main(list(argv))
+        self.assertEqual(caught.exception.code, 2)
+        return json.loads(out.getvalue())
+
+    def test_non_finite_and_non_positive_timeouts(self) -> None:
+        for bad in ("nan", "inf", "0", "-3", "soon"):
+            with self.subTest(value=bad):
+                payload = self.usage("probe", "host", "--first-frame-timeout", bad)
+                self.assertFalse(payload["ok"])
+                self.assertRegex(payload["error"], "finite|number")
+
+    def test_bad_ttl(self) -> None:
+        payload = self.usage("lease", "acquire", "--target", "t", "--owner", "me", "--ttl", "inf")
+        self.assertFalse(payload["ok"])
+
+    def test_bad_expect_size(self) -> None:
+        payload = self.usage("act", "host", "--expect-size", "garbage", "key", "a")
+        self.assertIn("WIDTHxHEIGHT", payload["error"])

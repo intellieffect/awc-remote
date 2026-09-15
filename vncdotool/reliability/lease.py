@@ -14,6 +14,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -26,6 +27,17 @@ from typing import Any, Callable, Iterator
 
 DEFAULT_TTL = 300.0
 _SLUG = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def check_seconds(value: float | str, what: str) -> float:
+    """A finite, positive number of seconds, or ``ValueError`` naming ``what``."""
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{what} must be a number of seconds, not {value!r}") from None
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError(f"{what} must be finite and positive, not {value!r}")
+    return seconds
 
 
 class LeaseError(Exception):
@@ -134,8 +146,7 @@ class LeaseStore:
         lease already, even as the same owner, does not grant a second one:
         renew the one you have.
         """
-        if ttl <= 0:
-            raise ValueError("ttl must be positive")
+        ttl = check_seconds(ttl, "ttl")
         now = self.clock()
         with self._locked(target) as record_path:
             current = self._read(record_path)
@@ -155,8 +166,7 @@ class LeaseStore:
 
     def renew(self, target: str, token: str, ttl: float = DEFAULT_TTL) -> Lease:
         """Extend a lease you hold; raises :class:`NotLeaseOwner` otherwise."""
-        if ttl <= 0:
-            raise ValueError("ttl must be positive")
+        ttl = check_seconds(ttl, "ttl")
         now = self.clock()
         with self._locked(target) as record_path:
             current = self._read(record_path)
@@ -183,6 +193,15 @@ class LeaseStore:
                 raise NotLeaseOwner(f"{target} is leased by {current.owner!r}, not by this token")
             record_path.unlink()
 
+    def held_by(self, target: str, token: str) -> Lease:
+        """The live lease on ``target`` if ``token`` is its token; else :class:`NotLeaseOwner`."""
+        current = self.status(target)
+        if current is None:
+            raise NotLeaseOwner(f"no live lease on {target}")
+        if not secrets.compare_digest(current.token, token):
+            raise NotLeaseOwner(f"{target} is leased by {current.owner!r}, not by this token")
+        return current
+
     def status(self, target: str) -> Lease | None:
         """The live lease on ``target``, or None."""
         now = self.clock()
@@ -191,3 +210,46 @@ class LeaseStore:
         if current is None or current.expired(now):
             return None
         return current
+
+
+class LeaseHold:
+    """A lease this process holds, kept alive across one bounded operation.
+
+    :meth:`ensure` is what an action calls right before it writes input: it
+    proves the lease is still this process's and pushes the expiry past the
+    operation's own bound, so the lease cannot lapse between the check and
+    the last byte of verification.
+    """
+
+    def __init__(self, store: LeaseStore, lease: Lease, owned: bool = False) -> None:
+        self.store = store
+        self.lease = lease
+        # Whether this hold took the lease itself (and so gives it back), or
+        # was handed a token by whoever did.
+        self.owned = owned
+
+    @property
+    def target(self) -> str:
+        return self.lease.target
+
+    def ensure(self, seconds: float) -> Lease:
+        """Renew so at least ``seconds`` remain; :class:`NotLeaseOwner` if it is not ours."""
+        seconds = check_seconds(seconds, "seconds")
+        now = self.store.clock()
+        remaining = self.lease.remaining(now)
+        ttl = max(seconds, remaining)
+        self.lease = self.store.renew(self.lease.target, self.lease.token, ttl)
+        return self.lease
+
+    def release(self) -> None:
+        self.store.release(self.lease.target, self.lease.token)
+
+
+def take(store: LeaseStore, target: str, owner: str, ttl: float = DEFAULT_TTL) -> LeaseHold:
+    """Acquire ``target`` for this process and hand back a hold that releases it."""
+    return LeaseHold(store, store.acquire(target, owner, ttl), owned=True)
+
+
+def hold(store: LeaseStore, target: str, token: str) -> LeaseHold:
+    """Adopt a lease someone else acquired; releasing stays their job."""
+    return LeaseHold(store, store.held_by(target, token), owned=False)

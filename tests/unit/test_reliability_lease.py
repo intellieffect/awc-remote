@@ -8,7 +8,9 @@ from pathlib import Path
 
 from vncdotool.reliability.lease import LeaseHeld, LeaseStore, NotLeaseOwner, slug
 
+# The canonical spelling: what `awc-remote` derives from "studio.example::5900".
 TARGET = "studio.example:5900"
+TARGET_SPELLING = "studio.example::5900"
 
 
 class FakeClock:
@@ -90,9 +92,32 @@ class TestLeaseStore(unittest.TestCase):
         with self.assertRaises(NotLeaseOwner):
             self.store.renew(TARGET, lease.token, ttl=60)
 
-    def test_ttl_must_be_positive(self) -> None:
-        with self.assertRaises(ValueError):
-            self.store.acquire(TARGET, "worker-a", ttl=0)
+    def test_ttl_must_be_finite_and_positive(self) -> None:
+        for bad in (0, -5, float("nan"), float("inf"), "soon"):
+            with self.subTest(ttl=bad), self.assertRaises(ValueError):
+                self.store.acquire(TARGET, "worker-a", ttl=bad)
+        self.assertIsNone(self.store.status(TARGET))
+
+    def test_hold_ensure_extends_and_release_gives_back(self) -> None:
+        from vncdotool.reliability.lease import hold, take
+        taken = take(self.store, TARGET, "worker-a", ttl=10)
+        self.assertTrue(taken.owned)
+
+        adopted = hold(self.store, TARGET, taken.lease.token)
+        self.assertFalse(adopted.owned)
+        adopted.ensure(100)
+        self.assertEqual(self.store.status(TARGET).expires_at, 1100.0)
+
+        taken.release()
+        self.assertIsNone(self.store.status(TARGET))
+        with self.assertRaises(NotLeaseOwner):
+            adopted.ensure(10)
+
+    def test_hold_with_a_wrong_token_is_refused(self) -> None:
+        from vncdotool.reliability.lease import hold
+        self.store.acquire(TARGET, "worker-a", ttl=10)
+        with self.assertRaises(NotLeaseOwner):
+            hold(self.store, TARGET, "nope")
 
     def test_status_hides_the_token(self) -> None:
         self.store.acquire(TARGET, "worker-a", ttl=60)
@@ -136,7 +161,7 @@ class TestLeaseAcrossProcesses(unittest.TestCase):
     def test_another_process_is_refused_while_this_one_holds(self) -> None:
         lease = self.store.acquire(TARGET, "in-process", ttl=60)
 
-        run = cli_lease(self.tmp.name, "acquire", "--target", TARGET, "--owner", "other-process")
+        run = cli_lease(self.tmp.name, "acquire", "--target", TARGET_SPELLING, "--owner", "other-process")
 
         self.assertEqual(run.returncode, 50, run.stderr)
         payload = json.loads(run.stdout)
@@ -148,7 +173,7 @@ class TestLeaseAcrossProcesses(unittest.TestCase):
     def test_another_process_cannot_release_this_ones_lease(self) -> None:
         lease = self.store.acquire(TARGET, "in-process", ttl=60)
 
-        run = cli_lease(self.tmp.name, "release", "--target", TARGET, "--token", "guess")
+        run = cli_lease(self.tmp.name, "release", "--target", TARGET_SPELLING, "--token", "guess")
 
         self.assertEqual(run.returncode, 51, run.stderr)
         self.assertEqual(self.store.status(TARGET).token, lease.token)
@@ -158,7 +183,7 @@ class TestLeaseAcrossProcesses(unittest.TestCase):
         import time
         time.sleep(0.1)
 
-        run = cli_lease(self.tmp.name, "acquire", "--target", TARGET, "--owner", "other-process", "--ttl", "5")
+        run = cli_lease(self.tmp.name, "acquire", "--target", TARGET_SPELLING, "--owner", "other-process", "--ttl", "5")
 
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(json.loads(run.stdout)["lease"]["owner"], "other-process")
@@ -168,7 +193,7 @@ class TestLeaseAcrossProcesses(unittest.TestCase):
         contenders = [
             subprocess.Popen(
                 [sys.executable, "-m", "vncdotool.reliability.cli", "lease", "--lease-dir", self.tmp.name,
-                 "acquire", "--target", TARGET, "--owner", f"contender-{i}", "--ttl", "30"],
+                 "acquire", "--target", TARGET_SPELLING, "--owner", f"contender-{i}", "--ttl", "30"],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
             )
             for i in range(3)

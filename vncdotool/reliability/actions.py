@@ -10,6 +10,11 @@ asserts, nothing more.
 An ``UNKNOWN`` receipt is the honest answer when the events went out and
 nothing confirmed or denied them within the bound.  Nothing here resends on
 ``UNKNOWN``: a second keypress after an unconfirmed first is two keypresses.
+
+Given a :class:`LeaseHold`, an action renews the lease to outlast its own
+bound right before writing, so the lease cannot expire mid-operation and a
+non-owner is refused before any input goes out.  The lease is cooperative:
+it orders callers who share the store, and nothing else.
 """
 
 from __future__ import annotations
@@ -23,13 +28,19 @@ from twisted.internet import reactor as default_reactor
 from twisted.internet.defer import Deferred
 from twisted.python.failure import Failure
 
+from ..client import VNCDoException
 from .client import ReliableClient
 from .frames import FrameInfo
+from .lease import LeaseError, LeaseHold, check_seconds
 
 if TYPE_CHECKING:
     from PIL import Image
 
 log = logging.getLogger(__name__)
+
+# How far past the verification bound the lease is kept alive: covers the
+# frame that lands as the timer fires and the receipt being written out.
+LEASE_MARGIN = 5.0
 
 Action = Callable[[ReliableClient], Any]
 Predicate = Callable[[ReliableClient, FrameInfo], bool]
@@ -77,6 +88,17 @@ def _name(fn: Callable[..., Any]) -> str:
     return getattr(fn, "__name__", None) or type(fn).__name__
 
 
+def _describe(exc: BaseException) -> str:
+    """An exception for a receipt: our own carry a safe message, others only a type.
+
+    An action's argument may be the text it typed, and a third-party
+    exception message may echo it.
+    """
+    if isinstance(exc, (VNCDoException, LeaseError)):
+        return f"{type(exc).__name__}: {exc}"
+    return type(exc).__name__
+
+
 class _Verification:
     def __init__(
         self,
@@ -110,10 +132,17 @@ class _Verification:
             return
         self.receipt.frame = frame
         self.receipt.frames_seen += 1
+        if frame.generation != self.receipt.generation:
+            self._finish(
+                ReceiptStatus.UNKNOWN,
+                f"screen moved from generation {self.receipt.generation} to {frame.generation} "
+                "after sending; the frame is not comparable to what the action was planned against",
+            )
+            return
         try:
             verified = bool(self.verify(self.client, frame))
         except Exception as exc:
-            self._finish(ReceiptStatus.UNKNOWN, f"predicate {_name(self.verify)} raised {exc!r}")
+            self._finish(ReceiptStatus.UNKNOWN, f"predicate {_name(self.verify)} raised {_describe(exc)}")
             return
         if verified:
             self.receipt.verified_by = _name(self.verify)
@@ -151,14 +180,18 @@ def perform(
     verify: Predicate | None = None,
     timeout: float = 5.0,
     generation: int | None = None,
+    lease: LeaseHold | None = None,
     clock: Any = default_reactor,
 ) -> Deferred:
     """Run ``action`` against ``client`` and settle an :class:`ActionReceipt`.
 
     The Deferred never errbacks; every outcome is a receipt.  ``generation``
     is the screen generation the action's coordinates were measured on; a
-    mismatch fails the action before anything is sent.
+    mismatch fails the action before anything is sent.  ``lease`` is renewed
+    to cover ``timeout`` before anything is sent and fails the action, unsent,
+    if it is not this caller's.
     """
+    timeout = check_seconds(timeout, "timeout")
     label = name or _name(action)
     receipt = ActionReceipt(
         action=label,
@@ -176,10 +209,26 @@ def perform(
         )
         return _settled(receipt)
 
+    if lease is not None:
+        try:
+            lease.ensure(timeout + LEASE_MARGIN)
+        except LeaseError as exc:
+            receipt.reason = f"lease on {lease.target} not held: {_describe(exc)}; nothing sent"
+            return _settled(receipt)
+
+    events_before = client.events_sent
     try:
         action(client)
     except Exception as exc:
-        receipt.reason = f"{label} raised {exc!r} before sending"
+        written = client.events_sent - events_before
+        if written:
+            # Part of the input is on the wire and part is not; neither half
+            # is resent, and the caller sees exactly how far it got.
+            receipt.status = ReceiptStatus.UNKNOWN
+            receipt.sent_at = clock.seconds()
+            receipt.reason = f"{label} raised {_describe(exc)} after {written} event(s) were written; nothing resent"
+        else:
+            receipt.reason = f"{label} raised {_describe(exc)} before sending"
         return _settled(receipt)
     receipt.status = ReceiptStatus.SENT
     receipt.sent_at = clock.seconds()
@@ -207,6 +256,10 @@ def key_press(key: str) -> Action:
 
 def type_text(text: str) -> Action:
     def type_(client: ReliableClient) -> None:
+        # Resolve every character first, so an unencodable one fails the
+        # whole action before any of the others is on the wire.
+        for char in text:
+            client._decodeKey(char)
         for char in text:
             client.keyPress(char)
     type_.__name__ = f"type {len(text)} char(s)"

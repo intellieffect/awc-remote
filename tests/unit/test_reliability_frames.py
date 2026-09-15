@@ -6,7 +6,7 @@ from twisted.internet.task import Clock
 from vncdotool.reliability.client import ReliableFactory
 from vncdotool.reliability.frames import FrameLog, is_black
 
-from reliability_fakes import FakeServer
+from tests.unit.reliability_fakes import FakeServer
 
 
 class FakeClock:
