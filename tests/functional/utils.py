@@ -374,7 +374,28 @@ OS_SERVERS_BY_PLATFORM: Dict[str, List[VNCServer]] = {
 }
 
 
-def os_servers(platform: str = sys.platform) -> List[VNCServer]:
+# A GitHub-hosted runner sets this itself; a self-hosted one says
+# "self-hosted", and a developer's shell says nothing.
+HOSTED_RUNNER_ENV = ("RUNNER_ENVIRONMENT", "github-hosted")
+
+
+def hosted_isolated_ci(env: Optional[Mapping[str, str]] = None) -> bool:
+    """Whether this process is on a throwaway hosted CI runner.
+
+    Only there is the OS-hosted VNC server a test target. Anywhere else,
+    whatever answers on this machine's 5900 is someone's real desktop --
+    Screen Sharing on a developer's Mac -- and a native scenario that sends
+    it a key or a click is not a test but an intrusion.
+    """
+    env = os.environ if env is None else env
+    name, value = HOSTED_RUNNER_ENV
+    return running_in_ci(env) and env.get(name, "") == value
+
+
+def os_servers(platform: str = sys.platform, env: Optional[Mapping[str, str]] = None) -> List[VNCServer]:
+    """The OS-hosted servers to register, which off a hosted runner is none."""
+    if not hosted_isolated_ci(env):
+        return []
     return OS_SERVERS_BY_PLATFORM.get(platform, [])
 
 

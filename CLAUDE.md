@@ -6,7 +6,9 @@ plain `tests` also collects `tests/functional/`, whose tests need the Docker
 Compose test server fleet (`make servers-up`) and fail loudly without it --
 they never skip, so a down fleet can't pass as green. The one exception is
 the OS-hosted servers of `test_server_compat_native.py`, which CI alone sets
-up: those skip off CI and fail on it (`utils.absent_server_skips`).
+up: they register only on a GitHub-hosted runner (`utils.os_servers`), so a
+local discover never dials this machine's own 5900, and a hosted runner
+without its server fails rather than skips (`utils.absent_server_skips`).
 Unit tests need no VNC server: protocol classes are driven directly with a
 mocked Twisted transport (see `tests/unit/test_rfb.py` and `test_client.py`
 for the patterns).
