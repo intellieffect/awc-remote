@@ -1,6 +1,9 @@
 """The in-container scene player, exercised through a real server."""
 from __future__ import annotations
 
+import json
+import os
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -14,9 +17,11 @@ from .utils import (
     HOST,
     SCENE_SERVERS,
     TIGERVNC,
+    X11VNC,
     FleetTestCase,
     VNCServer,
     assert_fleet_current,
+    fleet_tag,
     port_open,
     run_vncdo,
 )
@@ -57,6 +62,36 @@ class TestScenePlayer(TestCase):
     def test_a_shifted_key_selects_the_same_scene(self) -> None:
         self.assertEqual(scenes.read_patch(self._capture("key", "0")), "0")
         self.assertEqual(scenes.read_patch(self._capture("key", "S")), "s")
+
+
+TESTS_DIR = Path(__file__).resolve().parents[1]
+BESIDE_XEV_TIMEOUT = 60.0
+
+
+class TestScenePlayerBesideXev(TestCase):
+    """The x11vnc container runs `xev -root` beside the player, and X lets one
+    client at a time select ButtonPress on a window."""
+
+    def test_a_key_changes_the_scene_when_xev_already_watches_the_root_window(self) -> None:
+        prefix = os.environ.get("FLEET_IMAGE_PREFIX", "vncdotool-test")
+        image = f"{prefix}-x11vnc:{fleet_tag() or 'dev'}"
+        if subprocess.run(["docker", "image", "inspect", image], capture_output=True).returncode != 0:
+            self.fail(f"image {image} is not built; {X11VNC.how_to_start}")
+
+        result = subprocess.run(
+            [
+                "docker", "run", "--rm", "--network", "none",
+                "-v", f"{TESTS_DIR}:/src/tests:ro", "-w", "/src", "-e", "PYTHONPATH=/src",
+                "--entrypoint", "python3", image, "-m", "tests.servers.scene_player_keys",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=BESIDE_XEV_TIMEOUT,
+        )
+        if result.returncode != 0:
+            self.fail(f"scene_player_keys failed ({result.returncode}): {result.stdout}{result.stderr}")
+        report = json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertEqual(report["scene"], "s", report["player_output"])
 
 
 CLICKED_SCENE = "s"
